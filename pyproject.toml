@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "docker-observability"
+version = "0.1.0"
+description = "Container resource monitoring for agent workloads"
+requires-python = ">=3.10"
+dependencies = ["docker>=7,<8"]
+
+[project.optional-dependencies]
+reports = ["openpyxl>=3.1,<4"]
+
+[project.scripts]
+docker-observe = "docker_monitor:cli"
+docker-observe-report = "docker_report:cli"
+
+[tool.setuptools]
+py-modules = ["docker_monitor", "docker_report", "monitor"]

@@ -8,13 +8,16 @@ import os
 from pathlib import Path
 import signal
 import sys
+from datetime import datetime, timezone
 
-from ..report.results import absolute_timestamp
+
+def absolute_timestamp():
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 STARTUP_TIMEOUT_SEC = 30.0
 STOP_TIMEOUT_SEC = 30.0
 TERMINATE_TIMEOUT_SEC = 5.0
-MONITOR_SCRIPT = Path(__file__).resolve().with_name("spotbox_monitor.py")
+MONITOR_SCRIPT = Path(__file__).resolve().with_name("docker_monitor.py")
 
 
 async def finish_cleanup(task: asyncio.Task):
@@ -35,10 +38,18 @@ def validate_interval(value: float) -> None:
 
 
 class BatchMonitor:
-    def __init__(self, output_dir: Path, interval_sec: float = 1.0):
+    def __init__(self, output_dir: Path, interval_sec: float = 1.0, *, labels=(), containers=(), project=None):
         validate_interval(interval_sec)
         self.output_dir = output_dir.resolve() / "observability"
+        self.log_path = self.output_dir.parent / "observability-monitor.log"
         self.interval_sec = interval_sec
+        self.arguments = []
+        for label in labels:
+            self.arguments.extend(["--label", label])
+        for container in containers:
+            self.arguments.extend(["--container", container])
+        if project:
+            self.arguments.extend(["--project", project])
         self.process: asyncio.subprocess.Process | None = None
         self.log_handle = None
         self.started_at: str | None = None
@@ -55,14 +66,14 @@ class BatchMonitor:
         if self.output_dir.exists() and any(self.output_dir.iterdir()):
             raise ValueError(f"Refusing to overwrite monitoring data: {self.output_dir}")
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.log_handle = (self.output_dir / "monitor.log").open("w", encoding="utf-8")
+        self.log_handle = self.log_path.open("x", encoding="utf-8")
         environment = os.environ.copy()
         environment["PYTHONUNBUFFERED"] = "1"
         # Retain ownership if cancellation arrives while the OS creates the process.
         self.process, cancelled = await finish_cleanup(asyncio.create_task(
             asyncio.create_subprocess_exec(
                 sys.executable, "-u", str(MONITOR_SCRIPT), str(self.output_dir),
-                str(self.interval_sec), stdout=self.log_handle,
+                "--interval", str(self.interval_sec), *self.arguments, stdout=self.log_handle,
                 stderr=asyncio.subprocess.STDOUT, env=environment,
                 start_new_session=True,
             )
@@ -71,7 +82,7 @@ class BatchMonitor:
         if cancelled:
             raise asyncio.CancelledError
         deadline = asyncio.get_running_loop().time() + STARTUP_TIMEOUT_SEC
-        outputs = [self.output_dir / name for name in ("metrics_1s.jsonl", "sandbox_events.jsonl")]
+        outputs = [self.output_dir / name for name in ("metrics.jsonl", "container_events.jsonl")]
         while asyncio.get_running_loop().time() < deadline:
             if self.process.returncode is not None:
                 raise RuntimeError(f"monitor exited during startup: {self.process.returncode}")
@@ -124,7 +135,7 @@ class BatchMonitor:
                 self._stopped = True
         if self.error:
             try:
-                with (self.output_dir / "monitor.log").open("rb") as handle:
+                with self.log_path.open("rb") as handle:
                     handle.seek(0, 2)
                     handle.seek(max(0, handle.tell() - 2000))
                     tail = handle.read().decode("utf-8", errors="replace").strip()
